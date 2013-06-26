@@ -3,6 +3,9 @@ scratch2
 
 Prototype of redesigned type-checking/transformation for scala-async.
 
+[macro](https://github.com/retronym/scratch2/blob/master/macros/macros.scala)
+[usage](https://github.com/retronym/scratch2/blob/master/main/main.scala)
+
 Here's what it does.
 
 ```scala
