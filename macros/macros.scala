@@ -79,7 +79,7 @@ object FooMacros {
     val transformed = helper.transformAt(c.callsiteTyper.context, cd1) {
       case dd @ DefDef(mods, name @ FooName, tparams, vparamss, tpt, rhs) =>
         (context: analyzer.Context) => {
-          val changedOwner = splicee.changeOwner(callSiteOwner -> context.owner)
+          val changedOwner = splicee.changeOwner(callSiteOwner -> dd.symbol)
           val substed1 = changedOwner.substituteSymbols(fromSyms, toSyms)
           val newRhs = new UseFields(context).transform(substed1)
           treeCopy.DefDef(dd, mods, name, tparams, vparamss, tpt, newRhs)
