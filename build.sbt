@@ -10,5 +10,5 @@ lazy val macros = project settings (
 )
 
 lazy val main = project dependsOn(macros) settings(
-   scalacOptions in Compile ++= Seq() //Seq("-Xprint:all", "-Yshow-trees")
+   scalacOptions in Compile ++= Seq("-Ymacro-debug-lite") //Seq("-Xprint:all", "-Yshow-trees")
 )

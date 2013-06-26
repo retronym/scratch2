@@ -1,11 +1,11 @@
 import scala.language.experimental.macros
 import scala.tools.nsc.Global
 
-object FooMacros {
+object AsyncMini {
 
   import scala.reflect.macros.Context
 
-  def foo[T](t0: T) = macro fooImpl[T]
+  def spliceAndDice[T](t0: T) = macro fooImpl[T]
 
   def fooImpl[T: c0.WeakTypeTag](c0: Context)(t0: c0.Expr[T]): c0.Expr[Any] = {
     val c = powerMode(c0)
@@ -15,29 +15,62 @@ object FooMacros {
 
     val splicee = t.tree // no resetLocalAttrs(t.tree) needed! Yay!
 
-    val inputValDefs = t.tree match { case Block(stats, expr) => (stats :+ expr).collect { case vd: ValDef => vd}}
+    val helper = new MacroImpl[c.universe.type](c.universe)
+
+    //
+    // Converts foo(expr1, ..., exprN) to { val arg$1 = expr1; ... val arg$N = exprN; foo(arg$1, ..., arg$N)
+    //
+    class DumbAnf(ctx: analyzer.Context) extends helper.TypingTransformer(ctx) {
+      import treeInfo.isExprSafeToInline
+      override def transform(tree: Tree): Tree = tree match {
+        case Apply(fun, args) if args.exists(x => !isExprSafeToInline(x)) => // doesn't handle multiple param lists.
+          val temps: List[ValDef] = transformTrees(args).map { a =>
+            val name = localTyper.context.unit.freshTermName("arg$")
+            val sym = currentOwner0.newTermSymbol(name, tree.pos).setInfo(a.tpe)
+            ValDef(sym, a)
+          }
+          localTyper.typedPos(tree.pos) {
+            val refs = temps.map(_.symbol).map(gen.mkAttributedStableRef(_)) // doesn't handle varargs, by-names
+            Block(temps, treeCopy.Apply(tree, transform(fun), refs))
+          }
+        case _: Function | _: DefDef | _: ImplDef => // probably not exhaustive
+          tree // don't descend
+        case _ =>
+          super.transform(tree)
+      }
+    }
+    val spliceeAnf: Tree = new DumbAnf(c.callsiteTyper.context).transform(splicee)
+
     // Lift a stable var for each Val-/Var-Def in the provided block into the class C
-    val classValDefs = inputValDefs map {
-      vd =>
-        ValDef(Modifiers(MUTABLE | PRIVATE | LOCAL), newTermName(vd.name + "$lifted"), TypeTree(vd.symbol.tpe), EmptyTree)
+    val origValDefs = spliceeAnf match {
+      case Block(stats, expr) => (stats :+ expr).collect { case vd: ValDef => vd }
+      case x                  => List()
+    }
+    val classValDefs = origValDefs map { vd =>
+      val mods = Modifiers(MUTABLE | PRIVATE | LOCAL)
+      val name = newTermName(vd.name + "$lifted")
+      ValDef(mods, name, TypeTree(vd.symbol.tpe), EmptyTree)
     }
 
+    // def this() = super()
     val defaultConstructor = DefDef(Modifiers(), nme.CONSTRUCTOR, List(), List(List()), TypeTree(), Block(List(Apply(Select(Super(This(tpnme.EMPTY), tpnme.EMPTY), nme.CONSTRUCTOR), List())), Literal(Constant(()))))
 
-    // Splice the tree as-is into the RHS of `C#foo`
-    val fooDefDef = DefDef(Modifiers(), newTermName("foo"), List(), List(), TypeTree(definitions.AnyTpe), gen.mkZero(definitions.AnyTpe))
+    // This is the method under which we will splice the tree.
+    // def foo: <<splicee type>> = ???
+    //
+    // We'll fill in the method body later.
+    //
+    val FooName = newTermName("foo")
+    val fooDefDef = DefDef(Modifiers(), FooName, List(), List(), TypeTree(spliceeAnf.tpe), gen.mkZero(spliceeAnf.tpe))
 
+    // Create the class def
+    // { class C { def foo = ???; <STABLE> var x$lifted = _; ... }; val c = new C; c.foo }
     val classDef = Block(List(
-      // class C { def foo = ???; <STABLE> var x$lifted = _; ... }
       ClassDef(Modifiers(), newTypeName("C"), List(),
-        Template(List(Ident(definitions.AnyRefClass)), emptyValDef, List(defaultConstructor, fooDefDef) ++ classValDefs)
+        Template(List(Ident(definitions.AnyRefClass)), emptyValDef, (defaultConstructor :: classValDefs) :+ fooDefDef)
       ),
-      // val c = new C
-      ValDef(Modifiers(), newTermName("c"), TypeTree(), Apply(Select(New(Ident(newTypeName("C"))), nme.CONSTRUCTOR), List())),
-      // c.foo
-      Select(Ident(newTermName("c")), newTermName("foo"))),
-      // c: Any
-      Typed(Ident(newTermName("c")), Ident(definitions.AnyClass))
+      ValDef(Modifiers(), newTermName("c"), TypeTree(), Apply(Select(New(Ident(newTypeName("C"))), nme.CONSTRUCTOR), List()))),
+      Select(Ident(newTermName("c")), FooName)
     )
 
     // Typecheck what we have so far. This will assign symbols to the class and lifted vars.
@@ -47,24 +80,24 @@ object FooMacros {
     // us to use them as a prefix for a path, if the original code needs it.
     classValDefs.map(_.symbol.setFlag(reflect.internal.Flags.STABLE))
 
-    // Repair the owners of splicees to reflect the new location.
-    // Alternatively, we could have typechecked the shell before splicing, and
-    // patched in the splicee with a Transformer and an explicit changeOwner on
-    // the splicee.
-    val helper = new MacroImpl[c.universe.type](c.universe)
     val callSiteOwner = c.callsiteTyper.context.owner
-
-    val fromSyms = inputValDefs.map(_.symbol)
+    val fromSyms = origValDefs.map(_.symbol)
     val toSyms   = classValDefs.map(_.symbol)
 
+    // subsituted the old symbols for the new; this is needed if the types of the lifted
+    // val defs refer to the symbols of other vals that have been lifted.
+    val cd2 = cd1.substituteSymbols(fromSyms, toSyms)
+
+
+    // Replace the ValDefs in the splicee with Assigns to the corresponding lifted
+    // fields. Similarly, replace references to them with references to the field.
+    //
+    // This transform will be only be run on the RHS of `def foo`.
     class UseFields(ctx: analyzer.Context) extends helper.TypingTransformer(ctx) {
       override def transform(tree: Tree): Tree = tree match {
-        case _ if Set(callSiteOwner, callSiteOwner.owner).contains(currentOwner) =>
-          // Don't transform until we
-          super.transform(tree)
         case ValDef(_, _, _, rhs) if toSyms.contains(tree.symbol) =>
           val fieldSym = tree.symbol
-          val set = Assign(Select(gen.mkAttributedThis(fieldSym.owner), fieldSym), transform(rhs))
+          val set = Assign(gen.mkAttributedStableRef(fieldSym.owner.thisType, fieldSym), transform(rhs))
           localTyper.typedPos(tree.pos)(set)
         case Ident(name) if toSyms.contains(tree.symbol) =>
           val fieldSym = tree.symbol
@@ -75,13 +108,15 @@ object FooMacros {
           super.transform(tree)
       }
     }
-    val FooName = newTermName("foo")
-    val transformed = helper.transformAt(c.callsiteTyper.context, cd1) {
+
+    val transformed = helper.transformAt(c.callsiteTyper.context, cd2) {
       case dd @ DefDef(mods, name @ FooName, tparams, vparamss, tpt, rhs) =>
         (context: analyzer.Context) => {
-          val changedOwner = splicee.changeOwner(callSiteOwner -> dd.symbol)
-          val substed1 = changedOwner.substituteSymbols(fromSyms, toSyms)
-          val newRhs = new UseFields(context).transform(substed1)
+          val spliceeAnfFixedOwner = spliceeAnf.changeOwner(callSiteOwner -> dd.symbol)
+          // substitute old symbols for the new. We have to use the `UseFields` transform
+          // afterwards to complete things.
+          val spliceeAnfFixedOwnerSyms = spliceeAnfFixedOwner.substituteSymbols(fromSyms, toSyms)
+          val newRhs = new UseFields(context).transform(spliceeAnfFixedOwnerSyms)
           treeCopy.DefDef(dd, mods, name, tparams, vparamss, tpt, newRhs)
         }
     }
@@ -111,10 +146,11 @@ final class MacroImpl[G <: Global with Singleton](val g: G) {
 
   def repairOwners(t: Tree, macroCallSiteOwner: Symbol): g.Tree = {
     object repairer extends Transformer {
+      def currentOwner0: Symbol = currentOwner
       override def transform(t: Tree): Tree = {
         // TODO see `fixerUpper` in the pattern matcher for a slightly simpler way to do this.
-        if (currentOwner.hasTransOwner(macroCallSiteOwner) && currentOwner.owner != macroCallSiteOwner)
-          new ChangeOwnerAndModuleClassTraverser(macroCallSiteOwner, currentOwner)(t)
+        if (currentOwner0.hasTransOwner(macroCallSiteOwner) && currentOwner0.owner != macroCallSiteOwner)
+          new ChangeOwnerAndModuleClassTraverser(macroCallSiteOwner, currentOwner0)(t)
         else super.transform(t)
       }
     }
@@ -137,6 +173,7 @@ final class MacroImpl[G <: Global with Singleton](val g: G) {
     var localTyper: analyzer.Typer = analyzer.newTyper(ctx)
     protected var curTree: Tree = _
     protected def typedPos(pos: Position)(tree: Tree) = localTyper typed { atPos(pos)(tree) }
+    def currentOwner0: Symbol = currentOwner
 
     override final def atOwner[A](owner: Symbol)(trans: => A): A = atOwner(curTree, owner)(trans)
 
