@@ -16,6 +16,13 @@ object MacroTest {
         x
       }).apply()
     }
+
+    AsyncMini.spliceAndDice {
+      def conjure[T]: T = {println("conjured"); null.asInstanceOf[T]}
+      val p: List[Option[_]] = identity(conjure[List[Option[_]]])
+      p
+    }
+
     println("done")
   }
 }
