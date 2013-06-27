@@ -112,10 +112,11 @@ object AsyncMini {
     val transformed = helper.transformAt(c.callsiteTyper.context, cd2) {
       case dd @ DefDef(mods, name @ FooName, tparams, vparamss, tpt, rhs) =>
         (context: analyzer.Context) => {
-          val spliceeAnfFixedOwner = spliceeAnf.changeOwner(callSiteOwner -> dd.symbol)
+          // spliceeAnf.changeOwner(callSiteOwner -> dd.symbol) is not enough!
+          new helper.ChangeOwnerAndModuleClassTraverser(callSiteOwner, dd.symbol).traverse(spliceeAnf)
           // substitute old symbols for the new. We have to use the `UseFields` transform
           // afterwards to complete things.
-          val spliceeAnfFixedOwnerSyms = spliceeAnfFixedOwner.substituteSymbols(fromSyms, toSyms)
+          val spliceeAnfFixedOwnerSyms = spliceeAnf.substituteSymbols(fromSyms, toSyms)
           val newRhs = new UseFields(context).transform(spliceeAnfFixedOwnerSyms)
           treeCopy.DefDef(dd, mods, name, tparams, vparamss, tpt, newRhs)
         }

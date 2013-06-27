@@ -23,6 +23,19 @@ object MacroTest {
       p
     }
 
+    AsyncMini.spliceAndDice {
+      object Bar { def apply(a: Int) = new Foo(a) }
+      class Foo(a: Int)
+      val x = Bar.apply(1 + 1)
+      x
+    }
+
+    AsyncMini.spliceAndDice {
+      case class Foo(a: Int)
+      val x = Foo(1 + 1)
+      x
+    }
+
     println("done")
   }
 }
