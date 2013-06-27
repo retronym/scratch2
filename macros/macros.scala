@@ -171,6 +171,7 @@ final class MacroImpl[G <: Global with Singleton](val g: G) {
 
   // duplicated in part from TypingTransfomers
   abstract class TypingTransformer(ctx: analyzer.Context) extends Transformer {
+    currentOwner = ctx.owner
     var localTyper: analyzer.Typer = analyzer.newTyper(ctx)
     protected var curTree: Tree = _
     protected def typedPos(pos: Position)(tree: Tree) = localTyper typed { atPos(pos)(tree) }

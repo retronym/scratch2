@@ -36,6 +36,14 @@ object MacroTest {
       x
     }
 
+    AsyncMini.spliceAndDice {
+      val x = 12
+      ((Nil: Any): @unchecked) match {
+        case s: Seq[_] =>
+          println(x + x)
+      }
+    }
+
     println("done")
   }
 }
